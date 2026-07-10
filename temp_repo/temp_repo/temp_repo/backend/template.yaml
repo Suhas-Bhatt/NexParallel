@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: NEXUS REALITY ENGINE — React + Python Serverless Backend
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 90
+    MemorySize: 256
+    Layers:
+      - !Ref SharedLayer
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref SimulationsTable
+        S3_BUCKET: !Ref ReportsBucket
+        SNS_TOPIC_ARN: !Ref NotificationTopic
+        STEP_FUNCTION_ARN: !Ref SimulationStateMachine
+        AWS_REGION_NAME: !Ref AWS::Region
+        BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+        LOG_LEVEL: INFO
+
+Resources:
+  # ── Shared Python layer (shared/ utilities) ──────────────────────────────
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: nexus-python-shared
+      ContentUri: shared/
+      CompatibleRuntimes: [python3.11]
+      RetentionPolicy: Delete
+
+  # ── HTTP API Gateway ─────────────────────────────────────────────────────
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: nexus-api
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["Content-Type", "Authorization", "x-api-key"]
+        AllowMethods: ["GET", "POST", "OPTIONS"]
+
+  # ── Lambda: Orchestrator ─────────────────────────────────────────────────
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-orchestrator
+      CodeUri: functions/orchestrator/
+      Handler: lambda_function.lambda_handler
+      Description: "Entry point: validate input, start Step Functions"
+      Events:
+        Post:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /simulate, Method: POST }
+        Options:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /simulate, Method: OPTIONS }
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref SimulationsTable }
+        - StepFunctionsExecutionPolicy: { StateMachineName: !GetAtt SimulationStateMachine.Name }
+
+  # ── Lambda: Parse Scenario ───────────────────────────────────────────────
+  ParseScenarioFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-parse-scenario
+      CodeUri: functions/parse_scenario/
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      Description: "Step 1: Claude extracts structured data from scenario text"
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: [bedrock:InvokeModel]
+            Resource: "*"
+
+  # ── Lambda: Build Graph ──────────────────────────────────────────────────
+  BuildGraphFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-build-graph
+      CodeUri: functions/build_graph/
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      Description: "Step 2: Claude generates dependency graph nodes and edges"
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: [bedrock:InvokeModel]
+            Resource: "*"
+
+  # ── Lambda: Simulate Universe ────────────────────────────────────────────
+  SimulateUniverseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-simulate-universe
+      CodeUri: functions/simulate_universe/
+      Handler: lambda_function.lambda_handler
+      Timeout: 90
+      Description: "Step 3 (x3 parallel): Claude simulates one universe outcome"
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: [bedrock:InvokeModel]
+            Resource: "*"
+
+  # ── Lambda: Score Risks ──────────────────────────────────────────────────
+  ScoreRisksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-score-risks
+      CodeUri: functions/score_risks/
+      Handler: lambda_function.lambda_handler
+      Timeout: 30
+      Description: "Step 4: Clamp and sort risk scores — no AI calls"
+
+  # ── Lambda: Recommend ────────────────────────────────────────────────────
+  RecommendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-recommend
+      CodeUri: functions/recommend/
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      Description: "Step 5: Claude generates ranked action recommendations"
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: [bedrock:InvokeModel]
+            Resource: "*"
+
+  # ── Lambda: Finalizer ────────────────────────────────────────────────────
+  FinalizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-finalizer
+      CodeUri: functions/finalizer/
+      Handler: lambda_function.lambda_handler
+      Timeout: 30
+      Description: "Final step: Save COMPLETE result to DynamoDB, notify SNS"
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref SimulationsTable }
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt NotificationTopic.TopicName }
+
+  # ── Lambda: Get Simulation ────────────────────────────────────────────────
+  GetSimulationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-get-simulation
+      CodeUri: functions/get_simulation/
+      Handler: lambda_function.lambda_handler
+      Timeout: 10
+      Description: "GET /simulation/{id} — polling endpoint"
+      Events:
+        Get:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /simulation/{id}, Method: GET }
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref SimulationsTable }
+
+  # ── Lambda: Get History ───────────────────────────────────────────────────
+  GetHistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-get-history
+      CodeUri: functions/get_history/
+      Handler: lambda_function.lambda_handler
+      Timeout: 10
+      Description: "GET /history — list user simulations"
+      Events:
+        Get:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /history, Method: GET }
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref SimulationsTable }
+
+  # ── Lambda: Generate Report ───────────────────────────────────────────────
+  GenerateReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nexus-generate-report
+      CodeUri: functions/generate_report/
+      Handler: lambda_function.lambda_handler
+      Timeout: 30
+      Description: "POST /report — upload JSON to S3, return presigned URL"
+      Events:
+        Post:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /report, Method: POST }
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref SimulationsTable }
+        - S3CrudPolicy: { BucketName: !Ref ReportsBucket }
+
+  # ── Step Functions State Machine ─────────────────────────────────────────
+  SimulationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: nexus-simulation
+      DefinitionUri: step-functions/workflow.json
+      DefinitionSubstitutions:
+        ParseScenarioArn: !GetAtt ParseScenarioFunction.Arn
+        BuildGraphArn:    !GetAtt BuildGraphFunction.Arn
+        SimulateUniverseArn: !GetAtt SimulateUniverseFunction.Arn
+        ScoreRisksArn:    !GetAtt ScoreRisksFunction.Arn
+        RecommendArn:     !GetAtt RecommendFunction.Arn
+        FinalizerArn:     !GetAtt FinalizerFunction.Arn
+      Type: EXPRESS
+      Policies:
+        - LambdaInvokePolicy: { FunctionName: !Ref ParseScenarioFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref BuildGraphFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref SimulateUniverseFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref ScoreRisksFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref RecommendFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref FinalizerFunction }
+
+  # ── DynamoDB Table ───────────────────────────────────────────────────────
+  SimulationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: nexus-simulations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: simulation_id, AttributeType: S }
+        - { AttributeName: user_id,       AttributeType: S }
+        - { AttributeName: created_at,    AttributeType: S }
+      KeySchema:
+        - { AttributeName: simulation_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: userId-createdAt-index
+          KeySchema:
+            - { AttributeName: user_id,    KeyType: HASH }
+            - { AttributeName: created_at, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+
+  # ── S3 Bucket ────────────────────────────────────────────────────────────
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "nexus-reports-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: auto-archive
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # ── SNS Topic ────────────────────────────────────────────────────────────
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: nexus-notifications
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway URL — paste into frontend .env as VITE_API_URL"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  TableName:
+    Value: !Ref SimulationsTable
+  StateMachineArn:
+    Value: !Ref SimulationStateMachine
+  S3Bucket:
+    Value: !Ref ReportsBucket
