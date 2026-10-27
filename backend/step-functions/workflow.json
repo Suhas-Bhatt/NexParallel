@@ -1,0 +1,175 @@
+{
+  "Comment": "NEXUS REALITY ENGINE — Python Lambda Parallel Universe Pipeline",
+  "StartAt": "ParseScenario",
+  "States": {
+    "ParseScenario": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:parse_scenario",
+      "Next": "BuildGraph",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "BuildGraph": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:build_graph",
+      "Next": "SimulateUniverses",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "SimulateUniverses": {
+      "Type": "Parallel",
+      "Next": "CollectUniverses",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Branches": [
+        {
+          "StartAt": "SimA",
+          "States": {
+            "SimA": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:162975888073:function:simulate_universe",
+              "Parameters": {
+                "simulation_id.$": "$.simulation_id",
+                "parsed.$": "$.parsed",
+                "dependency_graph.$": "$.dependency_graph",
+                "scenario.$": "$.scenario",
+                "mitigation": "none"
+              },
+              "ResultPath": "$.universe",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "SimB",
+          "States": {
+            "SimB": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:162975888073:function:simulate_universe",
+              "Parameters": {
+                "simulation_id.$": "$.simulation_id",
+                "parsed.$": "$.parsed",
+                "dependency_graph.$": "$.dependency_graph",
+                "scenario.$": "$.scenario",
+                "mitigation": "partial"
+              },
+              "ResultPath": "$.universe",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "SimC",
+          "States": {
+            "SimC": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:162975888073:function:simulate_universe",
+              "Parameters": {
+                "simulation_id.$": "$.simulation_id",
+                "parsed.$": "$.parsed",
+                "dependency_graph.$": "$.dependency_graph",
+                "scenario.$": "$.scenario",
+                "mitigation": "optimal"
+              },
+              "ResultPath": "$.universe",
+              "End": true
+            }
+          }
+        }
+      ]
+    },
+    "CollectUniverses": {
+      "Type": "Pass",
+      "Parameters": {
+        "simulation_id.$": "$[0].simulation_id",
+        "scenario.$": "$[0].scenario",
+        "parsed.$": "$[0].parsed",
+        "dependency_graph.$": "$[0].dependency_graph",
+        "universes.$": "States.Array($[0].universe, $[1].universe, $[2].universe)"
+      },
+      "Next": "ScoreRisks"
+    },
+    "ScoreRisks": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:score_risk",
+      "Next": "Recommend",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ]
+    },
+    "Recommend": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:recommend",
+      "Next": "Finalize",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2
+        }
+      ]
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:finalizer",
+      "End": true
+    },
+    "HandleError": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:162975888073:function:finalizer",
+      "Parameters": {
+        "simulation_id.$": "$.simulation_id",
+        "status": "ERROR",
+        "error.$": "$.error"
+      },
+      "End": true
+    }
+  }
+}
